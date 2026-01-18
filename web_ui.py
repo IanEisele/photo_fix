@@ -456,14 +456,24 @@ async def run_comparison(log_area, results_container, stats_container):
         log(f"  Found {len(amazon_photos)} photos/videos")
         log(f"  Found {len(amazon_live_photos)} Live Photo pairs")
 
-        # Compute hashes for Amazon photos
+        # Compute hashes for Amazon photos using parallel processing
         log("")
-        log("Computing hashes for Amazon photos...")
-        for i, photo in enumerate(amazon_photos):
-            if i % 20 == 0:
-                log(f"  Processing {i+1}/{len(amazon_photos)}...")
-                await asyncio.sleep(0.01)
-            amazon_reader.compute_hashes_for_asset(photo)
+        log(f"Computing hashes for Amazon photos (using {os.cpu_count() or 4} CPU cores)...")
+
+        hash_progress = {"last_log": 0}
+
+        def amazon_hash_progress(completed: int, total: int, msg: str) -> None:
+            # Log every 10% or at least every 50 files
+            if completed - hash_progress["last_log"] >= max(total // 10, 50) or completed == total:
+                log(f"  {msg}")
+                hash_progress["last_log"] = completed
+
+        # Use parallel hashing - compute only SHA256 upfront, phash lazily
+        amazon_reader.compute_hashes_parallel(
+            amazon_photos,
+            progress_callback=amazon_hash_progress,
+            compute_phash=False,  # Lazy phash - compute only when needed
+        )
         log(f"  Completed {len(amazon_photos)} files")
 
         # Load iCloud photos
@@ -476,27 +486,53 @@ async def run_comparison(log_area, results_container, stats_container):
         log(f"  Found {len(icloud_photos)} photos/videos")
         log(f"  Found {len(icloud_live_photos)} Live Photo pairs")
 
-        # Compute hashes for iCloud photos
+        # Compute hashes for iCloud photos using parallel processing
         log("")
-        log("Computing hashes for iCloud photos...")
-        for i, photo in enumerate(icloud_photos):
-            if i % 20 == 0:
-                log(f"  Processing {i+1}/{len(icloud_photos)}...")
-                await asyncio.sleep(0.01)
-            icloud_reader.compute_hashes_for_asset(photo)
+        log(f"Computing hashes for iCloud photos (using {os.cpu_count() or 4} CPU cores)...")
+
+        hash_progress["last_log"] = 0
+
+        def icloud_hash_progress(completed: int, total: int, msg: str) -> None:
+            if completed - hash_progress["last_log"] >= max(total // 10, 50) or completed == total:
+                log(f"  {msg}")
+                hash_progress["last_log"] = completed
+
+        # iCloud photos need phash computed upfront for indexing
+        icloud_reader.compute_hashes_parallel(
+            icloud_photos,
+            progress_callback=icloud_hash_progress,
+            compute_phash=True,  # Need phash for index
+        )
         log(f"  Completed {len(icloud_photos)} files")
 
-        # Compare photos
+        # Compare photos with lazy perceptual hashing
         log("")
-        log("Comparing photos...")
+        log("Comparing photos (with lazy perceptual hashing)...")
         await asyncio.sleep(0.1)
+
+        compare_progress = {"last_log": 0, "phash_count": 0}
+
+        def on_phash_compute(msg: str) -> None:
+            compare_progress["phash_count"] += 1
+            if compare_progress["phash_count"] % 20 == 0:
+                log(f"  Computing lazy phash #{compare_progress['phash_count']}...")
+
+        def on_compare_progress(completed: int, total: int) -> None:
+            if completed - compare_progress["last_log"] >= max(total // 10, 50) or completed == total:
+                log(f"  Compared {completed}/{total} files...")
+                compare_progress["last_log"] = completed
+
         comparator = PhotoComparator(
             icloud_photos,
             perceptual_threshold=int(app_state.perceptual_threshold),
             verbose=False,
+            lazy_phash=True,  # Only compute phash when needed
+            phash_callback=on_phash_compute,
         )
-        results = comparator.compare_all(amazon_photos)
+        results = comparator.compare_all(amazon_photos, progress_callback=on_compare_progress)
         log(f"  Compared {len(results)} files")
+        if compare_progress["phash_count"] > 0:
+            log(f"  Computed {compare_progress['phash_count']} lazy perceptual hashes")
 
         # Compare Live Photos
         log("")

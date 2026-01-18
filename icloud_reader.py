@@ -4,7 +4,7 @@ import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 import imagehash
 import pillow_heif
@@ -212,6 +212,45 @@ class ICloudReader:
             asset.phash = compute_phash(asset.path)
 
         return asset
+
+    def compute_hashes_parallel(
+        self,
+        photos: list[PhotoAsset],
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        compute_phash: bool = True,
+    ) -> None:
+        """
+        Compute hashes for all photos using parallel processing.
+
+        Args:
+            photos: List of PhotoAsset objects to hash.
+            progress_callback: Optional callback(completed, total, message) for progress.
+            compute_phash: If True, also compute perceptual hashes.
+        """
+        from parallel_hasher import ParallelHasher
+
+        paths = [p.path for p in photos]
+        path_to_asset = {p.path: p for p in photos}
+
+        def on_progress(completed: int, total: int) -> None:
+            if progress_callback:
+                progress_callback(completed, total, f"Hashing {completed}/{total} files...")
+
+        hasher = ParallelHasher(progress_callback=on_progress)
+
+        if compute_phash:
+            # Compute both hashes together
+            results = hasher.compute_all_hashes_batch(paths)
+            for path, (sha256, phash) in results.items():
+                asset = path_to_asset[path]
+                asset.sha256 = sha256
+                if not asset.is_video:
+                    asset.phash = phash
+        else:
+            # Just compute SHA256
+            results = hasher.compute_sha256_batch(paths)
+            for path, sha256 in results.items():
+                path_to_asset[path].sha256 = sha256
 
     def load_all(self) -> tuple[list[PhotoAsset], list[LivePhoto]]:
         """Load all photos and Live Photos."""

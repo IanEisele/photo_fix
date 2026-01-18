@@ -7,8 +7,11 @@ and identify missing files for restoration.
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+from tqdm import tqdm
 
 from amazon_reader import AmazonReader
 from comparators import PhotoComparator
@@ -120,6 +123,8 @@ def main() -> int:
     reporter = Reporter(args.output, dry_run=args.dry_run, verbose=args.verbose)
 
     try:
+        cpu_count = os.cpu_count() or 4
+
         # Load Amazon photos
         print("Loading Amazon Photos...")
         amazon_reader = AmazonReader(args.amazon_folder, verbose=args.verbose)
@@ -128,12 +133,17 @@ def main() -> int:
         print(f"  Found {len(amazon_photos)} photos/videos")
         print(f"  Found {len(amazon_live_photos)} Live Photo pairs")
 
-        # Compute hashes for Amazon photos
-        print("\nComputing hashes for Amazon photos...")
-        for i, photo in enumerate(amazon_photos):
-            if args.verbose and i % 50 == 0:
-                print(f"  Processing {i+1}/{len(amazon_photos)}...")
-            amazon_reader.compute_hashes_for_asset(photo)
+        # Compute hashes for Amazon photos using parallel processing
+        print(f"\nComputing SHA256 hashes for Amazon photos ({cpu_count} CPU cores)...")
+        with tqdm(total=len(amazon_photos), unit="file", desc="Amazon SHA256") as pbar:
+            def amazon_progress(completed: int, total: int, msg: str) -> None:
+                pbar.update(completed - pbar.n)
+
+            amazon_reader.compute_hashes_parallel(
+                amazon_photos,
+                progress_callback=amazon_progress,
+                compute_phash=False,  # Lazy phash
+            )
 
         # Load iCloud photos
         print("\nLoading iCloud Photos...")
@@ -143,21 +153,41 @@ def main() -> int:
         print(f"  Found {len(icloud_photos)} photos/videos")
         print(f"  Found {len(icloud_live_photos)} Live Photo pairs")
 
-        # Compute hashes for iCloud photos
-        print("\nComputing hashes for iCloud photos...")
-        for i, photo in enumerate(icloud_photos):
-            if args.verbose and i % 50 == 0:
-                print(f"  Processing {i+1}/{len(icloud_photos)}...")
-            icloud_reader.compute_hashes_for_asset(photo)
+        # Compute hashes for iCloud photos (need phash for index)
+        print(f"\nComputing hashes for iCloud photos ({cpu_count} CPU cores)...")
+        with tqdm(total=len(icloud_photos), unit="file", desc="iCloud hashes") as pbar:
+            def icloud_progress(completed: int, total: int, msg: str) -> None:
+                pbar.update(completed - pbar.n)
 
-        # Compare photos
-        print("\nComparing photos...")
+            icloud_reader.compute_hashes_parallel(
+                icloud_photos,
+                progress_callback=icloud_progress,
+                compute_phash=True,  # Need phash for index
+            )
+
+        # Compare photos with lazy perceptual hashing
+        print("\nComparing photos (with lazy perceptual hashing)...")
+        lazy_phash_count = {"count": 0}
+
+        def on_lazy_phash(msg: str) -> None:
+            lazy_phash_count["count"] += 1
+
         comparator = PhotoComparator(
             icloud_photos,
             perceptual_threshold=args.perceptual_threshold,
             verbose=args.verbose,
+            lazy_phash=True,
+            phash_callback=on_lazy_phash,
         )
-        results = comparator.compare_all(amazon_photos)
+
+        with tqdm(total=len(amazon_photos), unit="file", desc="Comparing") as pbar:
+            def compare_progress(completed: int, total: int) -> None:
+                pbar.update(completed - pbar.n)
+
+            results = comparator.compare_all(amazon_photos, progress_callback=compare_progress)
+
+        if lazy_phash_count["count"] > 0:
+            print(f"  Computed {lazy_phash_count['count']} lazy perceptual hashes")
 
         # Compare Live Photos
         print("\nComparing Live Photos...")

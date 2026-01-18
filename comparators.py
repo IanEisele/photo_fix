@@ -1,7 +1,8 @@
 """Comparison logic for matching photos between Amazon and iCloud."""
 
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Callable, Optional
 
 import imagehash
 from dateutil import parser as date_parser
@@ -237,22 +238,50 @@ def compare(
     )
 
 
+def compute_phash_for_asset(path: Path) -> Optional[str]:
+    """Compute perceptual hash for a single image file."""
+    try:
+        from PIL import Image
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+
+        with Image.open(path) as img:
+            return str(imagehash.phash(img))
+    except Exception:
+        return None
+
+
 class PhotoComparator:
-    """Comparator class for batch photo comparison."""
+    """Comparator class for batch photo comparison with lazy hashing support."""
 
     def __init__(
         self,
         icloud_assets: list[PhotoAsset],
         perceptual_threshold: int = PERCEPTUAL_MATCH_THRESHOLD,
         verbose: bool = False,
+        lazy_phash: bool = True,
+        phash_callback: Optional[Callable[[str], None]] = None,
     ):
+        """
+        Initialize the comparator.
+
+        Args:
+            icloud_assets: List of iCloud assets to compare against.
+            perceptual_threshold: Hamming distance threshold for perceptual match.
+            verbose: Enable verbose logging.
+            lazy_phash: If True, compute perceptual hashes only when needed.
+            phash_callback: Optional callback when computing lazy phash.
+        """
         self.icloud_assets = icloud_assets
         self.perceptual_threshold = perceptual_threshold
         self.verbose = verbose
+        self.lazy_phash = lazy_phash
+        self.phash_callback = phash_callback
 
         # Build lookup indexes for faster matching
         self._by_sha256: dict[str, PhotoAsset] = {}
         self._by_dimensions_date: dict[tuple, list[PhotoAsset]] = {}
+        self._phash_index: dict[str, list[PhotoAsset]] = {}  # Bucketed by phash prefix
 
         for asset in icloud_assets:
             if asset.sha256:
@@ -263,10 +292,53 @@ class PhotoComparator:
                 self._by_dimensions_date[key] = []
             self._by_dimensions_date[key].append(asset)
 
+            # Build perceptual hash index (bucket by first 4 hex chars for locality)
+            if asset.phash:
+                prefix = asset.phash[:4]
+                if prefix not in self._phash_index:
+                    self._phash_index[prefix] = []
+                self._phash_index[prefix].append(asset)
+
     def _log(self, message: str) -> None:
         """Log message if verbose mode is enabled."""
         if self.verbose:
             print(f"[Comparator] {message}")
+
+    def _ensure_phash(self, asset: PhotoAsset) -> None:
+        """Ensure the asset has a perceptual hash computed (lazy computation)."""
+        if asset.phash is None and not asset.is_video:
+            if self.phash_callback:
+                self.phash_callback(f"Computing phash for {asset.path.name}")
+            asset.phash = compute_phash_for_asset(asset.path)
+
+    def _get_phash_candidates(self, amazon: PhotoAsset) -> list[PhotoAsset]:
+        """Get candidate iCloud assets for perceptual comparison using index."""
+        if not amazon.phash:
+            return []
+
+        # Get assets with similar perceptual hash prefixes
+        # Check the exact prefix and nearby prefixes (for small hash differences)
+        candidates = set()
+        prefix = amazon.phash[:4]
+
+        # Check exact prefix
+        if prefix in self._phash_index:
+            candidates.update(self._phash_index[prefix])
+
+        # Check neighboring prefixes (to handle small hash variations)
+        # This is a simple approximation - for each hex digit, check +/-1
+        try:
+            prefix_int = int(prefix, 16)
+            for delta in [-1, 1, -16, 16, -256, 256]:
+                neighbor = prefix_int + delta
+                if 0 <= neighbor <= 0xFFFF:
+                    neighbor_prefix = f"{neighbor:04x}"
+                    if neighbor_prefix in self._phash_index:
+                        candidates.update(self._phash_index[neighbor_prefix])
+        except ValueError:
+            pass
+
+        return list(candidates)
 
     def compare_asset(self, amazon: PhotoAsset) -> ComparisonResult:
         """Compare a single Amazon asset against iCloud library."""
@@ -281,6 +353,19 @@ class PhotoComparator:
                 reason="SHA256 hash match",
             )
 
+        # No exact match - compute perceptual hash if lazy mode
+        if self.lazy_phash:
+            self._ensure_phash(amazon)
+
+        # Try perceptual hash index first for images
+        if not amazon.is_video and amazon.phash:
+            phash_candidates = self._get_phash_candidates(amazon)
+            if phash_candidates:
+                for icloud in phash_candidates:
+                    result = perceptual_match(amazon, icloud, self.perceptual_threshold)
+                    if result and result.match_type == MatchResult.PERCEPTUAL:
+                        return result
+
         # Try narrowed search based on dimensions and date
         candidates = []
         key = (amazon.dimensions, amazon.exif_date[:10] if amazon.exif_date else None)
@@ -293,8 +378,21 @@ class PhotoComparator:
 
         return compare(amazon, candidates, self.perceptual_threshold)
 
-    def compare_all(self, amazon_assets: list[PhotoAsset]) -> list[ComparisonResult]:
-        """Compare all Amazon assets against iCloud library."""
+    def compare_all(
+        self,
+        amazon_assets: list[PhotoAsset],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> list[ComparisonResult]:
+        """
+        Compare all Amazon assets against iCloud library.
+
+        Args:
+            amazon_assets: List of Amazon assets to compare.
+            progress_callback: Optional callback(completed, total) for progress.
+
+        Returns:
+            List of comparison results.
+        """
         results = []
         total = len(amazon_assets)
 
@@ -302,7 +400,13 @@ class PhotoComparator:
             if self.verbose and i % 100 == 0:
                 self._log(f"Comparing {i+1}/{total}...")
 
+            if progress_callback and i % 10 == 0:
+                progress_callback(i, total)
+
             result = self.compare_asset(amazon)
             results.append(result)
+
+        if progress_callback:
+            progress_callback(total, total)
 
         return results
