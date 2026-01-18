@@ -442,11 +442,13 @@ async def run_comparison(log_area, results_container, stats_container):
     results_container.clear()
     stats_container.clear()
     log_area.clear()
+    app_state.clear_log()  # Keep app_state in sync
 
     app_state.is_running = True
 
     def log(msg: str):
-        log_area.push(msg)
+        app_state.log(msg)  # Persist with timestamp
+        log_area.push(app_state.log_messages[-1])  # Display formatted message
 
     try:
         log("Starting photo comparison...")
@@ -609,7 +611,8 @@ async def export_missing_files(log_area):
     app_state.is_exporting = True
 
     def log(msg: str):
-        log_area.push(msg)
+        app_state.log(msg)  # Persist with timestamp
+        log_area.push(app_state.log_messages[-1])  # Display formatted message
 
     try:
         log("")
@@ -776,6 +779,10 @@ def main_page():
         results_container, stats_container = create_results_section()
         log_area = create_log_section()
 
+        # Restore any existing log messages (for reconnection scenarios)
+        for msg in app_state.log_messages:
+            log_area.push(msg)
+
         # Now populate the action card
         with action_row:
             start_button = ui.button(
@@ -814,6 +821,7 @@ def main():
         port=8081,
         reload=False,
         show=True,
+        reconnect_timeout=60.0,  # Allow 60 seconds for reconnection
     )
 
 
