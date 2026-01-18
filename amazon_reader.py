@@ -1,6 +1,7 @@
 """Amazon Photos folder scanner."""
 
 import hashlib
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,8 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 
 from models import LivePhoto, PhotoAsset
+
+logger = logging.getLogger(__name__)
 
 # Register HEIF/HEIC support with Pillow
 pillow_heif.register_heif_opener()
@@ -34,7 +37,8 @@ def compute_sha256(path: Path) -> Optional[str]:
             for chunk in iter(lambda: f.read(65536), b""):
                 sha256.update(chunk)
         return sha256.hexdigest()
-    except (IOError, OSError):
+    except Exception as e:
+        logger.warning(f"Failed to compute SHA256 for {path}: {e}")
         return None
 
 
@@ -43,7 +47,8 @@ def compute_phash(path: Path) -> Optional[str]:
     try:
         with Image.open(path) as img:
             return str(imagehash.phash(img))
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to compute phash for {path}: {e}")
         return None
 
 

@@ -13,9 +13,19 @@ from models import ComparisonResult, MatchResult, PhotoAsset
 # Thresholds
 PERCEPTUAL_MATCH_THRESHOLD = 5  # Hamming distance for definite match
 PERCEPTUAL_UNCERTAIN_THRESHOLD = 10  # Hamming distance for uncertain match
-SIZE_TOLERANCE = 0.05  # 5% tolerance for file size comparison
-DATE_TOLERANCE_SECONDS = 60  # 1 minute tolerance for date comparison
+SIZE_TOLERANCE = 0.15  # 15% tolerance for file size comparison (handles re-encoding)
+DATE_TOLERANCE_SECONDS = 300  # 5 minutes tolerance for date comparison (handles timestamp drift)
 VIDEO_DURATION_TOLERANCE = 1.0  # 1 second tolerance for video duration
+DIMENSION_TOLERANCE = 0.02  # 2% tolerance for dimension differences
+
+
+def dimensions_match(dim1: tuple[int, int], dim2: tuple[int, int], tolerance: float = DIMENSION_TOLERANCE) -> bool:
+    """Check if dimensions match within tolerance."""
+    w1, h1 = dim1
+    w2, h2 = dim2
+    width_ratio = min(w1, w2) / max(w1, w2) if max(w1, w2) > 0 else 0
+    height_ratio = min(h1, h2) / max(h1, h2) if max(h1, h2) > 0 else 0
+    return width_ratio >= (1 - tolerance) and height_ratio >= (1 - tolerance)
 
 
 def exact_match(amazon: PhotoAsset, icloud: PhotoAsset) -> Optional[ComparisonResult]:
@@ -74,9 +84,9 @@ def perceptual_match(
 
 def metadata_match(amazon: PhotoAsset, icloud: PhotoAsset) -> Optional[ComparisonResult]:
     """Compare metadata (date, dimensions, size) for match."""
-    # Check dimensions match
+    # Check dimensions match with tolerance
     if amazon.dimensions and icloud.dimensions:
-        if amazon.dimensions != icloud.dimensions:
+        if not dimensions_match(amazon.dimensions, icloud.dimensions):
             return None
     elif amazon.dimensions or icloud.dimensions:
         # One has dimensions, the other doesn't - can't match on dimensions
@@ -124,24 +134,28 @@ def video_match(amazon: PhotoAsset, icloud: PhotoAsset) -> Optional[ComparisonRe
     confidence_factors = []
     reasons = []
 
-    # Check duration
+    # Check duration - optional, add confidence if available and matching
     if amazon.duration is not None and icloud.duration is not None:
         duration_diff = abs(amazon.duration - icloud.duration)
         if duration_diff <= VIDEO_DURATION_TOLERANCE:
             confidence_factors.append(0.9)
             reasons.append("duration match")
+        elif duration_diff <= VIDEO_DURATION_TOLERANCE * 3:  # 3 second grace period
+            confidence_factors.append(0.6)
+            reasons.append(f"duration close (diff={duration_diff:.1f}s)")
         else:
-            return None  # Duration mismatch is a strong indicator of different videos
+            return None  # Too different
+    # If duration missing, don't fail - just skip this factor
 
-    # Check dimensions
+    # Check dimensions - use tolerance instead of exact match
     if amazon.dimensions and icloud.dimensions:
-        if amazon.dimensions == icloud.dimensions:
+        if dimensions_match(amazon.dimensions, icloud.dimensions):
             confidence_factors.append(0.7)
             reasons.append("dimensions match")
         else:
-            return None  # Different dimensions
+            return None  # Dimensions don't match within tolerance
 
-    # Check date
+    # Check date - required for video matching
     if amazon.exif_date and icloud.exif_date:
         try:
             amazon_dt = date_parser.parse(amazon.exif_date)
@@ -153,7 +167,9 @@ def video_match(amazon: PhotoAsset, icloud: PhotoAsset) -> Optional[ComparisonRe
             else:
                 return None  # Different dates
         except (ValueError, TypeError):
-            pass
+            return None
+    else:
+        return None  # Both must have dates
 
     # Check file size ratio (for re-encoding detection)
     if amazon.file_size and icloud.file_size:
@@ -311,25 +327,24 @@ class PhotoComparator:
                 self.phash_callback(f"Computing phash for {asset.path.name}")
             asset.phash = compute_phash_for_asset(asset.path)
 
-    def _get_phash_candidates(self, amazon: PhotoAsset) -> list[PhotoAsset]:
-        """Get candidate iCloud assets for perceptual comparison using index."""
+    def _get_phash_candidates(self, amazon: PhotoAsset) -> set[PhotoAsset]:
+        """Get candidate iCloud assets based on perceptual hash prefix."""
         if not amazon.phash:
-            return []
+            return set()
 
-        # Get assets with similar perceptual hash prefixes
-        # Check the exact prefix and nearby prefixes (for small hash differences)
-        candidates = set()
+        candidates: set[PhotoAsset] = set()
         prefix = amazon.phash[:4]
 
-        # Check exact prefix
+        # Check exact prefix match
         if prefix in self._phash_index:
             candidates.update(self._phash_index[prefix])
 
-        # Check neighboring prefixes (to handle small hash variations)
-        # This is a simple approximation - for each hex digit, check +/-1
+        # Check neighboring prefixes - expanded deltas for better coverage
         try:
             prefix_int = int(prefix, 16)
-            for delta in [-1, 1, -16, 16, -256, 256]:
+            # Include more neighbors: +/-1, +/-16, +/-256, +/-4096, and diagonals
+            deltas = [-1, 1, -16, 16, -17, 17, -15, 15, -256, 256, -4096, 4096]
+            for delta in deltas:
                 neighbor = prefix_int + delta
                 if 0 <= neighbor <= 0xFFFF:
                     neighbor_prefix = f"{neighbor:04x}"
@@ -338,11 +353,11 @@ class PhotoComparator:
         except ValueError:
             pass
 
-        return list(candidates)
+        return candidates
 
     def compare_asset(self, amazon: PhotoAsset) -> ComparisonResult:
         """Compare a single Amazon asset against iCloud library."""
-        # Quick SHA256 lookup first
+        # 1. Try exact SHA256 match first (fastest)
         if amazon.sha256 and amazon.sha256 in self._by_sha256:
             icloud = self._by_sha256[amazon.sha256]
             return ComparisonResult(
@@ -353,11 +368,11 @@ class PhotoComparator:
                 reason="SHA256 hash match",
             )
 
-        # No exact match - compute perceptual hash if lazy mode
+        # 2. Ensure phash is computed for perceptual matching
         if self.lazy_phash:
             self._ensure_phash(amazon)
 
-        # Try perceptual hash index first for images
+        # 3. Try perceptual hash candidates
         if not amazon.is_video and amazon.phash:
             phash_candidates = self._get_phash_candidates(amazon)
             if phash_candidates:
@@ -366,13 +381,19 @@ class PhotoComparator:
                     if result and result.match_type == MatchResult.PERCEPTUAL:
                         return result
 
-        # Try narrowed search based on dimensions and date
+        # 4. Try dimension+date index
         candidates = []
         key = (amazon.dimensions, amazon.exif_date[:10] if amazon.exif_date else None)
         if key in self._by_dimensions_date:
             candidates = self._by_dimensions_date[key]
 
-        # If no candidates from index, fall back to full comparison
+        # 5. If no candidates from specific indexes, try date-only fallback
+        if not candidates and amazon.exif_date:
+            date_key = amazon.exif_date[:10]
+            candidates = [a for a in self.icloud_assets
+                          if a.exif_date and a.exif_date[:10] == date_key]
+
+        # 6. Final fallback: full comparison against all assets
         if not candidates:
             candidates = self.icloud_assets
 
