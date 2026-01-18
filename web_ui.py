@@ -7,8 +7,10 @@ NiceGUI-based web interface for comparing photo folders.
 
 import asyncio
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
+from string import ascii_uppercase
 from typing import Callable, Optional
 
 from nicegui import ui, app
@@ -151,9 +153,18 @@ class FolderBrowser:
                 ui.button("Documents", on_click=lambda: self.navigate_to(Path.home() / "Documents")).props(
                     "flat dense"
                 )
-                ui.button("/", on_click=lambda: self.navigate_to(Path("/"))).props(
-                    "flat dense"
-                )
+                if sys.platform == "win32":
+                    # Add drive letter buttons on Windows
+                    for letter in ascii_uppercase:
+                        drive = Path(f"{letter}:/")
+                        if drive.exists():
+                            ui.button(f"{letter}:", on_click=lambda d=drive: self.navigate_to(d)).props(
+                                "flat dense"
+                            )
+                else:
+                    ui.button("/", on_click=lambda: self.navigate_to(Path("/"))).props(
+                        "flat dense"
+                    )
 
             # Current path display
             with ui.row().classes("items-center gap-2 w-full bg-gray-50 p-2 rounded"):
