@@ -84,38 +84,45 @@ def perceptual_match(
 
 def metadata_match(amazon: PhotoAsset, icloud: PhotoAsset) -> Optional[ComparisonResult]:
     """Compare metadata (date, dimensions, size) for match."""
-    # Check dimensions match with tolerance
-    if amazon.dimensions and icloud.dimensions:
-        if not dimensions_match(amazon.dimensions, icloud.dimensions):
-            return None
-    elif amazon.dimensions or icloud.dimensions:
-        # One has dimensions, the other doesn't - can't match on dimensions
-        pass
-
-    # Check date match
-    if amazon.exif_date and icloud.exif_date:
-        try:
-            amazon_dt = date_parser.parse(amazon.exif_date)
-            icloud_dt = date_parser.parse(icloud.exif_date)
-            date_diff = abs((amazon_dt - icloud_dt).total_seconds())
-            if date_diff > DATE_TOLERANCE_SECONDS:
-                return None
-        except (ValueError, TypeError):
-            return None
-    else:
-        # No date info - can't match on metadata
+    # Check date match first - required
+    if not amazon.exif_date or not icloud.exif_date:
         return None
 
-    # Check file size (with tolerance for re-encoding)
+    try:
+        amazon_dt = date_parser.parse(amazon.exif_date)
+        icloud_dt = date_parser.parse(icloud.exif_date)
+        date_diff = abs((amazon_dt - icloud_dt).total_seconds())
+        if date_diff > DATE_TOLERANCE_SECONDS:
+            return None
+    except (ValueError, TypeError):
+        return None
+
+    # Check dimensions - if both have dimensions, apply tolerance
+    dimensions_matched = False
+    if amazon.dimensions and icloud.dimensions:
+        if dimensions_match(amazon.dimensions, icloud.dimensions):
+            dimensions_matched = True
+        # If dimensions don't match within tolerance, don't return None immediately
+        # Fall through to check file size
+
+    # Check file size
     size_ratio = amazon.file_size / icloud.file_size if icloud.file_size else 0
-    if not (1 - SIZE_TOLERANCE <= size_ratio <= 1 + SIZE_TOLERANCE):
-        # Sizes don't match closely - might still be the same image
-        # but confidence is lower
-        confidence = 0.6
-        reason = f"Metadata match (date match, dimensions match, size ratio={size_ratio:.2f})"
-    else:
-        confidence = 0.8
+    size_matched = (1 - SIZE_TOLERANCE) <= size_ratio <= (1 + SIZE_TOLERANCE)
+
+    # Determine confidence based on what matched
+    if dimensions_matched and size_matched:
+        confidence = 0.85
         reason = "Metadata match (date, dimensions, size all match)"
+    elif dimensions_matched:
+        confidence = 0.7
+        reason = f"Metadata match (date + dimensions, size ratio={size_ratio:.2f})"
+    elif size_matched:
+        confidence = 0.65
+        reason = "Metadata match (date + size, dimensions differ)"
+    else:
+        # Only date matches - low confidence
+        confidence = 0.5
+        reason = f"Weak metadata match (date only, size ratio={size_ratio:.2f})"
 
     return ComparisonResult(
         amazon_asset=amazon,
@@ -297,6 +304,7 @@ class PhotoComparator:
         # Build lookup indexes for faster matching
         self._by_sha256: dict[str, PhotoAsset] = {}
         self._by_dimensions_date: dict[tuple, list[PhotoAsset]] = {}
+        self._by_date: dict[str, list[PhotoAsset]] = {}  # Date-only index for fallback
         self._phash_index: dict[str, list[PhotoAsset]] = {}  # Bucketed by phash prefix
 
         for asset in icloud_assets:
@@ -307,6 +315,13 @@ class PhotoComparator:
             if key not in self._by_dimensions_date:
                 self._by_dimensions_date[key] = []
             self._by_dimensions_date[key].append(asset)
+
+            # Build date-only index for fallback matching
+            if asset.exif_date:
+                date_key = asset.exif_date[:10]
+                if date_key not in self._by_date:
+                    self._by_date[date_key] = []
+                self._by_date[date_key].append(asset)
 
             # Build perceptual hash index (bucket by first 4 hex chars for locality)
             if asset.phash:
@@ -387,11 +402,11 @@ class PhotoComparator:
         if key in self._by_dimensions_date:
             candidates = self._by_dimensions_date[key]
 
-        # 5. If no candidates from specific indexes, try date-only fallback
+        # 5. If no exact dimension match, use date-only index with dimension tolerance
         if not candidates and amazon.exif_date:
             date_key = amazon.exif_date[:10]
-            candidates = [a for a in self.icloud_assets
-                          if a.exif_date and a.exif_date[:10] == date_key]
+            if date_key in self._by_date:
+                candidates = self._by_date[date_key]
 
         # 6. Final fallback: full comparison against all assets
         if not candidates:
