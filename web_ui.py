@@ -800,7 +800,7 @@ def main():
     """Run the web UI."""
     ui.run(
         title="Photo Restore Tool",
-        port=8080,
+        port=8081,
         reload=False,
         show=True,
     )
