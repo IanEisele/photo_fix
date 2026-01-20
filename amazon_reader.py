@@ -10,7 +10,7 @@ from typing import Callable, Iterator, Optional
 import imagehash
 import pillow_heif
 from PIL import Image
-from PIL.ExifTags import TAGS
+from PIL.ExifTags import IFD, TAGS
 
 from models import LivePhoto, PhotoAsset
 
@@ -62,18 +62,29 @@ def get_image_dimensions(path: Path) -> Optional[tuple[int, int]]:
 
 
 def get_exif_date(path: Path) -> Optional[str]:
-    """Extract EXIF date from image."""
+    """Extract EXIF date from image - handles both JPEG and HEIC/HEIF."""
     try:
         with Image.open(path) as img:
-            exif = img._getexif()
+            exif = img.getexif()
             if not exif:
                 return None
 
-            # Look for DateTimeOriginal (36867) or DateTime (306)
+            # Check EXIF IFD for DateTimeOriginal first (most accurate)
+            exif_ifd = exif.get_ifd(IFD.Exif)
+            if exif_ifd:
+                for tag_id, value in exif_ifd.items():
+                    tag = TAGS.get(tag_id, tag_id)
+                    if tag in ("DateTimeOriginal", "DateTimeDigitized"):
+                        try:
+                            dt = datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+                            return dt.isoformat()
+                        except ValueError:
+                            pass
+
+            # Fall back to base EXIF DateTime
             for tag_id, value in exif.items():
                 tag = TAGS.get(tag_id, tag_id)
-                if tag in ("DateTimeOriginal", "DateTime"):
-                    # Parse and convert to ISO format
+                if tag == "DateTime":
                     try:
                         dt = datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
                         return dt.isoformat()
