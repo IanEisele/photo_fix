@@ -20,12 +20,20 @@ DIMENSION_TOLERANCE = 0.02  # 2% tolerance for dimension differences
 
 
 def dimensions_match(dim1: tuple[int, int], dim2: tuple[int, int], tolerance: float = DIMENSION_TOLERANCE) -> bool:
-    """Check if dimensions match within tolerance."""
+    """Check if dimensions match within tolerance, accounting for rotation."""
     w1, h1 = dim1
     w2, h2 = dim2
+
+    # Check normal orientation
     width_ratio = min(w1, w2) / max(w1, w2) if max(w1, w2) > 0 else 0
     height_ratio = min(h1, h2) / max(h1, h2) if max(h1, h2) > 0 else 0
-    return width_ratio >= (1 - tolerance) and height_ratio >= (1 - tolerance)
+    if width_ratio >= (1 - tolerance) and height_ratio >= (1 - tolerance):
+        return True
+
+    # Check rotated orientation (90° rotation swaps width and height)
+    width_ratio_rotated = min(w1, h2) / max(w1, h2) if max(w1, h2) > 0 else 0
+    height_ratio_rotated = min(h1, w2) / max(h1, w2) if max(h1, w2) > 0 else 0
+    return width_ratio_rotated >= (1 - tolerance) and height_ratio_rotated >= (1 - tolerance)
 
 
 def exact_match(amazon: PhotoAsset, icloud: PhotoAsset) -> Optional[ComparisonResult]:
