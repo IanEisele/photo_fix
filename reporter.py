@@ -190,7 +190,6 @@ class Reporter:
         self,
         results: list[ComparisonResult],
         live_results: list[LivePhotoComparisonResult],
-        year: int,
         amazon_folder: Path,
     ) -> Path:
         """Generate the final JSON report."""
@@ -221,7 +220,6 @@ class Reporter:
 
         report = {
             "generated_at": datetime.now().isoformat(),
-            "year": year,
             "amazon_folder": str(amazon_folder),
             "dry_run": self.dry_run,
             "summary": self.stats.to_dict(),

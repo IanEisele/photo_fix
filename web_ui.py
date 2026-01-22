@@ -196,7 +196,6 @@ class PhotoRestoreApp:
         self.amazon_folder: str = ""
         self.icloud_folder: str = ""
         self.output_folder: str = ""
-        self.year: int = datetime.now().year
         self.perceptual_threshold: int = 5
 
         self.is_running: bool = False
@@ -330,16 +329,6 @@ def create_folder_inputs():
                     "output_folder",
                     show_counts=False,
                 )
-
-            with ui.column().classes("w-full"):
-                ui.label("Year").classes("text-weight-medium")
-                year_input = ui.number(
-                    value=app_state.year,
-                    min=1990,
-                    max=2030,
-                    step=1,
-                ).classes("w-full")
-                year_input.bind_value(app_state, "year")
 
 
 def create_options():
@@ -563,7 +552,7 @@ async def run_comparison(log_area, results_container, stats_container):
         log("")
         log("Generating report...")
         report_path = reporter.generate_report(
-            results, live_results, int(app_state.year), amazon_path
+            results, live_results, amazon_path
         )
         log(f"Report saved to: {report_path}")
 
