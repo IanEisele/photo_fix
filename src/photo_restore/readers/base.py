@@ -1,122 +1,40 @@
-"""iCloud export folder scanner."""
+"""Base reader class for photo folder scanning."""
 
-import hashlib
-import logging
 import os
-from datetime import datetime
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-import imagehash
-import pillow_heif
-from dateutil import parser as date_parser
-from PIL import Image
-from PIL.ExifTags import IFD, TAGS
-
-from models import LivePhoto, PhotoAsset
-
-logger = logging.getLogger(__name__)
-
-# Register HEIF/HEIC support with Pillow
-pillow_heif.register_heif_opener()
-
-# Supported image extensions
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".heic", ".heif", ".png", ".gif", ".webp", ".tiff", ".tif", ".bmp"}
-
-# Video file extensions
-VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v", ".avi", ".mkv", ".3gp"}
-
-# All supported extensions
-ALL_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+from photo_restore.core.constants import ALL_EXTENSIONS, VIDEO_EXTENSIONS
+from photo_restore.core.hashing import (
+    compute_phash,
+    compute_sha256,
+    get_exif_date,
+    get_file_date,
+    get_image_dimensions,
+)
+from photo_restore.core.models import LivePhoto, PhotoAsset
+from photo_restore.core.parallel_hasher import ParallelHasher
 
 
-def compute_sha256(path: Path) -> Optional[str]:
-    """Compute SHA256 hash of a file."""
-    try:
-        sha256 = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                sha256.update(chunk)
-        return sha256.hexdigest()
-    except Exception as e:
-        logger.warning(f"Failed to compute SHA256 for {path}: {e}")
-        return None
-
-
-def compute_phash(path: Path) -> Optional[str]:
-    """Compute perceptual hash of an image."""
-    try:
-        with Image.open(path) as img:
-            return str(imagehash.phash(img))
-    except Exception as e:
-        logger.warning(f"Failed to compute phash for {path}: {e}")
-        return None
-
-
-def get_image_dimensions(path: Path) -> Optional[tuple[int, int]]:
-    """Get image dimensions."""
-    try:
-        with Image.open(path) as img:
-            return img.size
-    except Exception:
-        return None
-
-
-def get_exif_date(path: Path) -> Optional[str]:
-    """Extract EXIF date from image - handles both JPEG and HEIC/HEIF."""
-    try:
-        with Image.open(path) as img:
-            exif = img.getexif()
-            if not exif:
-                return None
-
-            # Check EXIF IFD for DateTimeOriginal first (most accurate)
-            exif_ifd = exif.get_ifd(IFD.Exif)
-            if exif_ifd:
-                for tag_id, value in exif_ifd.items():
-                    tag = TAGS.get(tag_id, tag_id)
-                    if tag in ("DateTimeOriginal", "DateTimeDigitized"):
-                        try:
-                            dt = datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-                            return dt.isoformat()
-                        except ValueError:
-                            pass
-
-            # Fall back to base EXIF DateTime
-            for tag_id, value in exif.items():
-                tag = TAGS.get(tag_id, tag_id)
-                if tag == "DateTime":
-                    try:
-                        dt = datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-                        return dt.isoformat()
-                    except ValueError:
-                        pass
-    except Exception:
-        pass
-    return None
-
-
-def get_file_date(path: Path) -> Optional[str]:
-    """Get file modification date as fallback."""
-    try:
-        mtime = os.path.getmtime(path)
-        return datetime.fromtimestamp(mtime).isoformat()
-    except OSError:
-        return None
-
-
-class ICloudReader:
-    """Scanner for iCloud Photos export folder."""
+class BaseReader(ABC):
+    """Abstract base class for photo folder readers."""
 
     def __init__(self, folder: Path, verbose: bool = False):
         self.folder = Path(folder)
         self.verbose = verbose
         self._all_files: Optional[list[Path]] = None
 
+    @property
+    @abstractmethod
+    def log_prefix(self) -> str:
+        """Return the prefix to use for log messages."""
+        pass
+
     def _log(self, message: str) -> None:
         """Log message if verbose mode is enabled."""
         if self.verbose:
-            print(f"[iCloud] {message}")
+            print(f"[{self.log_prefix}] {message}")
 
     def _scan_files(self) -> list[Path]:
         """Scan folder for all media files."""
@@ -135,20 +53,6 @@ class ICloudReader:
         self._log(f"Found {len(files)} media files")
         self._all_files = files
         return files
-
-    def get_photos(self) -> Iterator[PhotoAsset]:
-        """Get all photos/videos from the folder."""
-        files = self._scan_files()
-        self._log(f"Processing {len(files)} files...")
-        count = 0
-
-        for path in files:
-            asset = self._create_asset(path)
-            if asset:
-                count += 1
-                yield asset
-
-        self._log(f"Loaded {count} assets")
 
     def _create_asset(self, path: Path) -> Optional[PhotoAsset]:
         """Create a PhotoAsset from a file path."""
@@ -176,9 +80,27 @@ class ICloudReader:
             dimensions=dimensions,
         )
 
+    def _get_files_for_processing(self) -> list[Path]:
+        """Get files for processing. Subclasses can override to filter."""
+        return self._scan_files()
+
+    def get_photos(self) -> Iterator[PhotoAsset]:
+        """Get all photos/videos from the folder."""
+        files = self._get_files_for_processing()
+        self._log(f"Processing {len(files)} files...")
+        count = 0
+
+        for path in files:
+            asset = self._create_asset(path)
+            if asset:
+                count += 1
+                yield asset
+
+        self._log(f"Loaded {count} assets")
+
     def get_live_photos(self) -> Iterator[LivePhoto]:
         """Detect and return Live Photo pairs."""
-        files = self._scan_files()
+        files = self._get_files_for_processing()
 
         # Group by base filename to find pairs
         by_basename: dict[str, dict[str, Path]] = {}
@@ -243,8 +165,6 @@ class ICloudReader:
             progress_callback: Optional callback(completed, total, message) for progress.
             compute_phash: If True, also compute perceptual hashes.
         """
-        from parallel_hasher import ParallelHasher
-
         paths = [p.path for p in photos]
         path_to_asset = {p.path: p for p in photos}
 

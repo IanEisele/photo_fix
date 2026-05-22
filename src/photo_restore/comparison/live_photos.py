@@ -2,8 +2,8 @@
 
 from typing import Optional
 
-from comparators import PhotoComparator
-from models import ComparisonResult, LivePhoto, LivePhotoComparisonResult, MatchResult
+from photo_restore.comparison.comparators import PhotoComparator
+from photo_restore.core.models import ComparisonResult, LivePhoto, LivePhotoComparisonResult, MatchResult
 
 
 class LivePhotoHandler:

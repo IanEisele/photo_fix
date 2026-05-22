@@ -13,11 +13,9 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from amazon_reader import AmazonReader
-from comparators import PhotoComparator
-from icloud_reader import ICloudReader
-from live_photos import LivePhotoHandler
-from reporter import Reporter
+from photo_restore.comparison import PhotoComparator, LivePhotoHandler
+from photo_restore.output import Reporter
+from photo_restore.readers import AmazonReader, ICloudReader
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,19 +25,17 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Dry run for 2023
-  uv run python photo_restore.py \\
+  # Dry run
+  photo-restore \\
     --amazon-folder ~/amazon-photos/2023 \\
     --icloud-folder ~/icloud-export/2023 \\
-    --year 2023 \\
     --output ~/photo-restore \\
     --dry-run
 
   # Actual run
-  uv run python photo_restore.py \\
+  photo-restore \\
     --amazon-folder ~/amazon-photos/2023 \\
     --icloud-folder ~/icloud-export/2023 \\
-    --year 2023 \\
     --output ~/photo-restore
         """,
     )
@@ -55,12 +51,6 @@ Examples:
         type=Path,
         required=True,
         help="Path to iCloud Photos export folder",
-    )
-    parser.add_argument(
-        "--year",
-        type=int,
-        required=True,
-        help="Year being processed (for report metadata)",
     )
     parser.add_argument(
         "--output",
@@ -114,7 +104,6 @@ def main() -> int:
     print("==================")
     print(f"Amazon folder: {args.amazon_folder}")
     print(f"iCloud folder: {args.icloud_folder}")
-    print(f"Year: {args.year}")
     print(f"Output: {args.output}")
     print(f"Dry run: {args.dry_run}")
     print()
@@ -201,7 +190,7 @@ def main() -> int:
         # Generate report
         print("\nGenerating report...")
         report_path = reporter.generate_report(
-            results, live_results, args.year, args.amazon_folder
+            results, live_results, args.amazon_folder
         )
         print(f"Report saved to: {report_path}")
 

@@ -15,12 +15,17 @@ from typing import Callable, Optional
 
 from nicegui import ui, app
 
-from amazon_reader import AmazonReader, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, ALL_EXTENSIONS
-from comparators import PhotoComparator
-from icloud_reader import ICloudReader
-from live_photos import LivePhotoHandler
-from models import ComparisonResult, MatchResult, ProcessingStats
-from reporter import Reporter
+from photo_restore.comparison import PhotoComparator, LivePhotoHandler
+from photo_restore.core import (
+    ALL_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    ComparisonResult,
+    MatchResult,
+    ProcessingStats,
+)
+from photo_restore.output import Reporter
+from photo_restore.readers import AmazonReader, ICloudReader
 
 
 def count_media_files(folder_path: str) -> dict:

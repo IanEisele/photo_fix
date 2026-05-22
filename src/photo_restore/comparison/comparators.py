@@ -6,7 +6,7 @@ from typing import Callable, Optional
 import imagehash
 from dateutil import parser as date_parser
 
-from models import ComparisonResult, MatchResult, PhotoAsset
+from photo_restore.core.models import ComparisonResult, MatchResult, PhotoAsset
 
 # Thresholds
 PERCEPTUAL_MATCH_THRESHOLD = 5

@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from models import (
+from photo_restore.core.models import (
     ComparisonResult,
     LivePhotoComparisonResult,
     MatchResult,
